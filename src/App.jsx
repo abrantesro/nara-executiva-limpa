@@ -1,5 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Sparkles, Trash2, Lightbulb, Users, Compass, Mic, MicOff, Paperclip, X } from 'lucide-react';
+import {
+  Send,
+  Sparkles,
+  Trash2,
+  Lightbulb,
+  Users,
+  Compass,
+  Mic,
+  MicOff,
+  Paperclip,
+  X,
+  Volume2,
+  Square,
+} from 'lucide-react';
 
 const SYSTEM_PROMPT = `Você é NARA, a Secretária Executiva Inteligente do ecossistema AMZTECH.
 Sua filosofia: "QUEM PRECISA. QUEM TEM. NARA CONECTA."
@@ -11,7 +24,7 @@ Seu papel:
 - Na AMZTECH: coordenar, orientar, organizar e acompanhar, sempre deixando claro quando algo ainda está em fase concebida, prototipada ou funcional/testada.
 
 Fluxo operacional de 9 etapas:
-01. Escuta -> 02. Compreende -> 03. Pesquisa -> 04. Planeja -> 05. Valida -> 06. Executa -> 07. Verifica -> 08. Entrega -> 09. Acompanha.
+1. Escuta -> 02. Compreende -> 03. Pesquisa -> 04. Planeja -> 05. Valida -> 06. Executa -> 07. Verifica -> 08. Entrega -> 09. Acompanha.
 
 Limites obrigatórios (nunca quebrar):
 - Nunca inventar informações ou fatos.
@@ -21,6 +34,15 @@ Limites obrigatórios (nunca quebrar):
 - Responder sempre em português do Brasil, de forma acolhedora, organizada e com o próximo passo claro.`;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const cleanTextForSpeech = (rawText = '') => {
+  return rawText
+    .replace(/```[\s\S]*?```/g, ' bloco de código ')
+    .replace(/[*#_`~>]+/g, ' ')
+    .replace(/[📎⚠️❌✨]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
 
 export default function App() {
   const [messages, setMessages] = useState(() => {
@@ -38,16 +60,67 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [statusNote, setStatusNote] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [speakingIdx, setSpeakingIdx] = useState(null);
+  const [autoSpeak, setAutoSpeak] = useState(true);
   const [attachment, setAttachment] = useState(null);
+
   const bottomRef = useRef(null);
   const fileInputRef = useRef(null);
   const recognitionRef = useRef(null);
-  const voiceDoneRef = useRef(false);
+  const shouldKeepListeningRef = useRef(false);
+  const baseInputRef = useRef('');
 
   useEffect(() => {
     localStorage.setItem('nara_amztech_chat', JSON.stringify(messages));
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      shouldKeepListeningRef.current = false;
+      recognitionRef.current?.stop();
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const stopSpeaking = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingIdx(null);
+  };
+
+  const speakText = (text, index = null) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return;
+    }
+
+    const cleaned = cleanTextForSpeech(text);
+    if (!cleaned) return;
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(cleaned);
+    utterance.lang = 'pt-BR';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+
+    const voices = window.speechSynthesis.getVoices();
+    const ptVoice =
+      voices.find((v) => v.lang && v.lang.toLowerCase().includes('pt-br')) ||
+      voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('pt'));
+    if (ptVoice) {
+      utterance.voice = ptVoice;
+    }
+
+    utterance.onstart = () => setSpeakingIdx(index);
+    utterance.onend = () => setSpeakingIdx(null);
+    utterance.onerror = () => setSpeakingIdx(null);
+
+    window.speechSynthesis.speak(utterance);
+  };
 
   const toggleVoice = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -57,30 +130,65 @@ export default function App() {
     }
 
     if (isListening) {
+      shouldKeepListeningRef.current = false;
       recognitionRef.current?.stop();
       setIsListening(false);
       return;
     }
 
-    voiceDoneRef.current = false;
+    stopSpeaking();
+    shouldKeepListeningRef.current = true;
+    baseInputRef.current = input.trim();
+
     const recognition = new SpeechRecognition();
     recognition.lang = 'pt-BR';
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => setIsListening(true);
-    recognition.onresult = (event) => {
-      if (voiceDoneRef.current) return;
-      voiceDoneRef.current = true;
-      const transcript = event.results?.[0]?.[0]?.transcript?.trim();
-      if (transcript) {
-        setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-      }
-      recognition.stop();
+    recognition.onstart = () => {
+      setIsListening(true);
     };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+
+    recognition.onresult = (event) => {
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let i = 0; i < event.results.length; i++) {
+        const piece = event.results[i][0]?.transcript || '';
+        if (event.results[i].isFinal) {
+          finalTranscript += piece + ' ';
+        } else {
+          interimTranscript += piece;
+        }
+      }
+
+      const combined = `${baseInputRef.current} ${finalTranscript}${interimTranscript}`
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      setInput(combined);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        shouldKeepListeningRef.current = false;
+        setIsListening(false);
+      }
+    };
+
+    recognition.onend = () => {
+      if (shouldKeepListeningRef.current) {
+        baseInputRef.current = input.trim();
+        try {
+          recognition.start();
+          return;
+        } catch {
+          shouldKeepListeningRef.current = false;
+        }
+      }
+      setIsListening(false);
+    };
 
     recognitionRef.current = recognition;
     recognition.start();
@@ -110,7 +218,7 @@ export default function App() {
   };
 
   const listCandidateModels = async (apiKey) => {
-    const fallbackList = ['gemini-3.8-flash'];
+    const fallbackList = ['gemini-2.5-flash', 'gemini-flash-lite-latest'];
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
       const data = await res.json();
@@ -130,9 +238,9 @@ export default function App() {
       if (supported.length === 0) return fallbackList;
 
       const ordered = [
-        ...supported.filter((n) => n.includes('3.8')),
-        ...supported.filter((n) => !n.includes('3.8') && n.includes('flash')),
-        ...supported.filter((n) => !n.includes('3.8') && !n.includes('flash')),
+        ...supported.filter((n) => n.includes('2.5') && n.includes('flash')),
+        ...supported.filter((n) => n.includes('flash') && !n.includes('2.5')),
+        ...supported.filter((n) => !n.includes('flash')),
       ];
 
       return [...new Set(ordered)];
@@ -219,6 +327,13 @@ export default function App() {
     const textToSend = (customText || input).trim();
     if ((!textToSend && !attachment) || loading) return;
 
+    if (isListening) {
+      shouldKeepListeningRef.current = false;
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    }
+    stopSpeaking();
+
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       setMessages((prev) => [
@@ -243,8 +358,11 @@ export default function App() {
       ...messages,
       { role: 'user', text: displayUserText, attachment: currentAttachment },
     ];
+    const nextModelIndex = updatedMessages.length;
+
     setMessages(updatedMessages);
     setInput('');
+    baseInputRef.current = '';
     setAttachment(null);
     setLoading(true);
     setStatusNote('NARA está ouvindo, organizando e preparando o próximo passo...');
@@ -271,6 +389,9 @@ export default function App() {
 
       if (result.ok) {
         setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
+        if (autoSpeak) {
+          speakText(result.reply, nextModelIndex);
+        }
       } else {
         setMessages((prev) => [
           ...prev,
@@ -284,6 +405,7 @@ export default function App() {
   };
 
   const clearHistory = () => {
+    stopSpeaking();
     const initial = [
       {
         role: 'model',
@@ -297,7 +419,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col max-w-4xl mx-auto p-4">
-      <header className="flex items-center justify-between bg-emerald-950/90 border border-emerald-700/50 rounded-2xl p-4 mb-4 shadow-lg">
+      <header className="flex items-center justify-between bg-emerald-950/90 border border-emerald-700/50 rounded-2xl p-4 mb-4 shadow-lg gap-2 flex-wrap">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-full bg-gradient-to-br from-emerald-500 via-amber-400 to-sky-500 flex items-center justify-center font-bold text-slate-950 text-xl shadow">
             N
@@ -311,17 +433,36 @@ export default function App() {
             </p>
           </div>
         </div>
-        <button
-          onClick={clearHistory}
-          title="Limpar conversa"
-          className="flex items-center gap-1 text-xs bg-slate-800 hover:bg-red-950 text-slate-300 hover:text-red-300 px-3 py-2 rounded-lg border border-slate-700 transition"
-        >
-          <Trash2 className="w-4 h-4" /> Nova conversa
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (speakingIdx !== null) stopSpeaking();
+              setAutoSpeak((prev) => !prev);
+            }}
+            title="Ativar ou desativar leitura automática em voz alta"
+            className={`flex items-center gap-1 text-xs px-3 py-2 rounded-lg border transition ${
+              autoSpeak
+                ? 'bg-emerald-900/70 border-emerald-500 text-emerald-200'
+                : 'bg-slate-800 border-slate-700 text-slate-400'
+            }`}
+          >
+            <Volume2 className="w-4 h-4" /> {autoSpeak ? 'Voz ligada' : 'Voz desligada'}
+          </button>
+          <button
+            type="button"
+            onClick={clearHistory}
+            title="Limpar conversa"
+            className="flex items-center gap-1 text-xs bg-slate-800 hover:bg-red-950 text-slate-300 hover:text-red-300 px-3 py-2 rounded-lg border border-slate-700 transition"
+          >
+            <Trash2 className="w-4 h-4" /> Nova conversa
+          </button>
+        </div>
       </header>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
         <button
+          type="button"
           onClick={() =>
             sendMessage(
               'Tive uma ideia no DECIDA AÍ (Hora do Estalo). Me ajude a estruturar o projeto, analisar viabilidade, recursos e próximos passos.'
@@ -333,6 +474,7 @@ export default function App() {
           <span>Hora do Estalo (DECIDA AÍ)</span>
         </button>
         <button
+          type="button"
           onClick={() =>
             sendMessage(
               'Preciso organizar um plano de ação e acompanhar etapas de uma demanda na AMZTECH.'
@@ -344,6 +486,7 @@ export default function App() {
           <span>Planejar na AMZTECH</span>
         </button>
         <button
+          type="button"
           onClick={() =>
             sendMessage(
               'Quero mapear quem precisa de ajuda, quem pode oferecer ajuda e como encaminhar ao CONECTAR.'
@@ -357,22 +500,45 @@ export default function App() {
       </div>
 
       <main className="flex-1 bg-slate-900/75 border border-slate-800 rounded-2xl p-4 overflow-y-auto space-y-4 mb-4 max-h-[60vh]">
-        {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
+        {messages.map((msg, idx) => {
+          const isModel = msg.role === 'model';
+          const isSpeakingThis = speakingIdx === idx;
+          return (
             <div
-              className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap leading-relaxed ${
-                msg.role === 'user'
-                  ? 'bg-emerald-700 text-white rounded-br-none'
-                  : 'bg-slate-800 text-slate-100 border border-slate-700 rounded-bl-none'
-              }`}
+              key={idx}
+              className={`flex ${isModel ? 'justify-start' : 'justify-end'}`}
             >
-              {msg.text}
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap leading-relaxed ${
+                  isModel
+                    ? 'bg-slate-800 text-slate-100 border border-slate-700 rounded-bl-none'
+                    : 'bg-emerald-700 text-white rounded-br-none'
+                }`}
+              >
+                <div>{msg.text}</div>
+                {isModel && (
+                  <div className="mt-2 pt-2 border-t border-slate-700/70 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => (isSpeakingThis ? stopSpeaking() : speakText(msg.text, idx))}
+                      className="inline-flex items-center gap-1 text-xs text-amber-300 hover:text-amber-200"
+                    >
+                      {isSpeakingThis ? (
+                        <>
+                          <Square className="w-3.5 h-3.5" /> Parar áudio
+                        </>
+                      ) : (
+                        <>
+                          <Volume2 className="w-3.5 h-3.5" /> Ouvir resposta
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         {loading && (
           <div className="text-xs text-amber-400 animate-pulse">
             {statusNote || 'NARA está ouvindo, organizando e preparando o próximo passo...'}
@@ -434,7 +600,10 @@ export default function App() {
         <input
           type="text"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (!isListening) baseInputRef.current = e.target.value;
+          }}
           placeholder={isListening ? 'Ouvindo sua voz...' : 'Escreva, fale ou anexe um PDF/foto para a NARA...'}
           className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-4 py-3 text-sm outline-none"
         />
