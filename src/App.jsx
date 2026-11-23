@@ -20,12 +20,6 @@ Limites obrigatórios (nunca quebrar):
 - Nunca expor dados privados e não substituir especialistas humanos em decisões técnicas, médicas ou jurídicas.
 - Responder sempre em português do Brasil, de forma acolhedora, organizada e com o próximo passo claro.`;
 
-const MODELS_TO_TRY = [
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-];
-
 export default function App() {
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem('nara_amztech_chat');
@@ -110,13 +104,33 @@ export default function App() {
     e.target.value = '';
   };
 
-  const callGeminiWithFallback = async (apiKey, contents) => {
-    let lastError = 'Erro ao conectar com a API do Gemini.';
+  const discoverAvailableModel = async (apiKey) => {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      const data = await res.json();
+      if (!res.ok || !Array.isArray(data.models)) return null;
 
-    for (const modelName of MODELS_TO_TRY) {
+      const supported = data.models.filter(
+        (m) =>
+          Array.isArray(m.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent')
+      );
+
+      const flashModel = supported.find((m) => m.name.includes('flash'));
+      const chosen = flashModel || supported[0];
+      return chosen ? chosen.name.replace(/^models\//, '') : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const callGemini = async (apiKey, contents) => {
+    const preferredModel = 'gemini-3.8-flash';
+    let modelToUse = preferredModel;
+
+    const tryGenerate = async (modelName) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 25000);
-
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
@@ -130,28 +144,48 @@ export default function App() {
             }),
           }
         );
-
         clearTimeout(timeoutId);
         const data = await response.json();
-
-        if (response.ok) {
-          const reply =
-            data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-            'Não recebi resposta agora. Podemos tentar novamente com calma.';
-          return { ok: true, reply };
-        }
-
-        lastError = data?.error?.message || lastError;
+        return { response, data };
       } catch (err) {
         clearTimeout(timeoutId);
-        lastError =
+        throw err;
+      }
+    };
+
+    try {
+      let { response, data } = await tryGenerate(modelToUse);
+
+      if (!response.ok) {
+        const discovered = await discoverAvailableModel(apiKey);
+        if (discovered && discovered !== modelToUse) {
+          modelToUse = discovered;
+          const retry = await tryGenerate(modelToUse);
+          response = retry.response;
+          data = retry.data;
+        }
+      }
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: data?.error?.message || 'Erro ao conectar com a API do Gemini.',
+        };
+      }
+
+      const reply =
+        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        'Não recebi resposta agora. Podemos tentar novamente com calma.';
+      return { ok: true, reply };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
           err.name === 'AbortError'
             ? 'A resposta demorou mais do que o esperado. Tente novamente.'
-            : err.message || lastError;
-      }
+            : err.message || 'Erro de rede ao conectar com o Gemini.',
+      };
     }
-
-    return { ok: false, error: lastError };
   };
 
   const sendMessage = async (customText) => {
@@ -205,7 +239,7 @@ export default function App() {
         };
       });
 
-      const result = await callGeminiWithFallback(apiKey, contents);
+      const result = await callGemini(apiKey, contents);
 
       if (result.ok) {
         setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
