@@ -104,90 +104,6 @@ export default function App() {
     e.target.value = '';
   };
 
-  const discoverAvailableModel = async (apiKey) => {
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-      const data = await res.json();
-      if (!res.ok || !Array.isArray(data.models)) return null;
-
-      const supported = data.models.filter(
-        (m) =>
-          Array.isArray(m.supportedGenerationMethods) &&
-          m.supportedGenerationMethods.includes('generateContent')
-      );
-
-      const flashModel = supported.find((m) => m.name.includes('flash'));
-      const chosen = flashModel || supported[0];
-      return chosen ? chosen.name.replace(/^models\//, '') : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const callGemini = async (apiKey, contents) => {
-    const preferredModel = 'gemini-3.8-flash';
-    let modelToUse = preferredModel;
-
-    const tryGenerate = async (modelName) => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000);
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-              contents,
-            }),
-          }
-        );
-        clearTimeout(timeoutId);
-        const data = await response.json();
-        return { response, data };
-      } catch (err) {
-        clearTimeout(timeoutId);
-        throw err;
-      }
-    };
-
-    try {
-      let { response, data } = await tryGenerate(modelToUse);
-
-      if (!response.ok) {
-        const discovered = await discoverAvailableModel(apiKey);
-        if (discovered && discovered !== modelToUse) {
-          modelToUse = discovered;
-          const retry = await tryGenerate(modelToUse);
-          response = retry.response;
-          data = retry.data;
-        }
-      }
-
-      if (!response.ok) {
-        return {
-          ok: false,
-          error: data?.error?.message || 'Erro ao conectar com a API do Gemini.',
-        };
-      }
-
-      const reply =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        'Não recebi resposta agora. Podemos tentar novamente com calma.';
-      return { ok: true, reply };
-    } catch (err) {
-      return {
-        ok: false,
-        error:
-          err.name === 'AbortError'
-            ? 'A resposta demorou mais do que o esperado. Tente novamente.'
-            : err.message || 'Erro de rede ao conectar com o Gemini.',
-      };
-    }
-  };
-
   const sendMessage = async (customText) => {
     const textToSend = (customText || input).trim();
     if ((!textToSend && !attachment) || loading) return;
@@ -221,6 +137,9 @@ export default function App() {
     setAttachment(null);
     setLoading(true);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
     try {
       const contents = updatedMessages.map((m) => {
         const parts = [];
@@ -239,16 +158,41 @@ export default function App() {
         };
       });
 
-      const result = await callGemini(apiKey, contents);
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents,
+          }),
+        }
+      );
 
-      if (result.ok) {
-        setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${result.error}` },
-        ]);
+      clearTimeout(timeoutId);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.error?.message || 'Erro ao conectar com a API do Gemini.');
       }
+
+      const reply =
+        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        'Não recebi resposta agora. Podemos tentar novamente com calma.';
+
+      setMessages((prev) => [...prev, { role: 'model', text: reply }]);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const message =
+        err.name === 'AbortError'
+          ? 'A resposta demorou mais do que o esperado. Tente novamente.'
+          : err.message || 'Erro de rede ao conectar com o Gemini.';
+      setMessages((prev) => [
+        ...prev,
+        { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${message}` },
+      ]);
     } finally {
       setLoading(false);
     }
