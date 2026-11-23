@@ -20,6 +20,8 @@ Limites obrigatórios (nunca quebrar):
 - Nunca expor dados privados e não substituir especialistas humanos em decisões técnicas, médicas ou jurídicas.
 - Responder sempre em português do Brasil, de forma acolhedora, organizada e com o próximo passo claro.`;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export default function App() {
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem('nara_amztech_chat');
@@ -34,6 +36,7 @@ export default function App() {
   });
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [statusNote, setStatusNote] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [attachment, setAttachment] = useState(null);
   const bottomRef = useRef(null);
@@ -76,12 +79,8 @@ export default function App() {
       }
       recognition.stop();
     };
-    recognition.onerror = () => {
-      setIsListening(false);
-    };
-    recognition.onend = () => {
-      setIsListening(false);
-    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
 
     recognitionRef.current = recognition;
     recognition.start();
@@ -90,6 +89,12 @@ export default function App() {
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.name.toLowerCase().endsWith('.docx') || file.name.toLowerCase().endsWith('.doc')) {
+      alert('Dica: Para a NARA ler documentos sem bloqueio, salve o arquivo em PDF (.pdf) ou texto (.txt) antes de anexar.');
+      e.target.value = '';
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = () => {
@@ -102,6 +107,112 @@ export default function App() {
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const listCandidateModels = async (apiKey) => {
+    const fallbackList = ['gemini-3.8-flash'];
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      const data = await res.json();
+      if (!res.ok || !Array.isArray(data.models)) return fallbackList;
+
+      const supported = data.models
+        .filter(
+          (m) =>
+            Array.isArray(m.supportedGenerationMethods) &&
+            m.supportedGenerationMethods.includes('generateContent') &&
+            !m.name.includes('embedding') &&
+            !m.name.includes('imagen') &&
+            !m.name.includes('tts')
+        )
+        .map((m) => m.name.replace(/^models\//, ''));
+
+      if (supported.length === 0) return fallbackList;
+
+      const ordered = [
+        ...supported.filter((n) => n.includes('3.8')),
+        ...supported.filter((n) => !n.includes('3.8') && n.includes('flash')),
+        ...supported.filter((n) => !n.includes('3.8') && !n.includes('flash')),
+      ];
+
+      return [...new Set(ordered)];
+    } catch {
+      return fallbackList;
+    }
+  };
+
+  const trySingleRequest = async (apiKey, modelName, contents) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents,
+          }),
+        }
+      );
+      clearTimeout(timeoutId);
+      const data = await response.json();
+      return { response, data };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
+  };
+
+  const callGeminiResilient = async (apiKey, contents) => {
+    const models = await listCandidateModels(apiKey);
+    let lastError = 'Erro ao conectar com a API do Gemini.';
+
+    for (const modelName of models) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          setStatusNote(
+            attempt === 1
+              ? `Conectando (${modelName})...`
+              : `Canal ocupado, buscando oxigênio alternativo (${modelName})...`
+          );
+
+          if (attempt > 1) {
+            await sleep(1500);
+          }
+
+          const { response, data } = await trySingleRequest(apiKey, modelName, contents);
+
+          if (response.ok) {
+            const reply =
+              data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+              'Não recebi resposta agora. Podemos tentar novamente com calma.';
+            return { ok: true, reply };
+          }
+
+          const errMsg = data?.error?.message || lastError;
+          lastError = errMsg;
+
+          const isHighDemand =
+            response.status === 429 ||
+            response.status === 503 ||
+            /high demand|overloaded|temporarily unavailable|try again/i.test(errMsg);
+
+          if (!isHighDemand) {
+            break;
+          }
+        } catch (err) {
+          lastError =
+            err.name === 'AbortError'
+              ? 'A resposta demorou mais do que o esperado.'
+              : err.message || lastError;
+        }
+      }
+    }
+
+    return { ok: false, error: lastError };
   };
 
   const sendMessage = async (customText) => {
@@ -136,9 +247,7 @@ export default function App() {
     setInput('');
     setAttachment(null);
     setLoading(true);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    setStatusNote('NARA está ouvindo, organizando e preparando o próximo passo...');
 
     try {
       const contents = updatedMessages.map((m) => {
@@ -158,43 +267,19 @@ export default function App() {
         };
       });
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents,
-          }),
-        }
-      );
+      const result = await callGeminiResilient(apiKey, contents);
 
-      clearTimeout(timeoutId);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data?.error?.message || 'Erro ao conectar com a API do Gemini.');
+      if (result.ok) {
+        setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${result.error}` },
+        ]);
       }
-
-      const reply =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        'Não recebi resposta agora. Podemos tentar novamente com calma.';
-
-      setMessages((prev) => [...prev, { role: 'model', text: reply }]);
-    } catch (err) {
-      clearTimeout(timeoutId);
-      const message =
-        err.name === 'AbortError'
-          ? 'A resposta demorou mais do que o esperado. Tente novamente.'
-          : err.message || 'Erro de rede ao conectar com o Gemini.';
-      setMessages((prev) => [
-        ...prev,
-        { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${message}` },
-      ]);
     } finally {
       setLoading(false);
+      setStatusNote('');
     }
   };
 
@@ -290,7 +375,7 @@ export default function App() {
         ))}
         {loading && (
           <div className="text-xs text-amber-400 animate-pulse">
-            NARA está ouvindo, organizando e preparando o próximo passo...
+            {statusNote || 'NARA está ouvindo, organizando e preparando o próximo passo...'}
           </div>
         )}
         <div ref={bottomRef} />
@@ -320,14 +405,14 @@ export default function App() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*,.pdf,.txt,.csv,.doc,.docx"
+          accept="image/*,.pdf,.txt,.csv"
           onChange={handleFileChange}
           className="hidden"
         />
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          title="Importar documento ou foto"
+          title="Importar PDF, texto ou foto"
           className="bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 p-3 rounded-xl transition shrink-0"
         >
           <Paperclip className="w-5 h-5" />
@@ -350,7 +435,7 @@ export default function App() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={isListening ? 'Ouvindo sua voz...' : 'Escreva, fale ou anexe um arquivo para a NARA...'}
+          placeholder={isListening ? 'Ouvindo sua voz...' : 'Escreva, fale ou anexe um PDF/foto para a NARA...'}
           className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-4 py-3 text-sm outline-none"
         />
         <button
