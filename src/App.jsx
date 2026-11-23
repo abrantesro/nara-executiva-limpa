@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Sparkles, Trash2, Lightbulb, Users, Compass } from 'lucide-react';
+import { Send, Sparkles, Trash2, Lightbulb, Users, Compass, Mic, MicOff, Paperclip, X } from 'lucide-react';
 
 const SYSTEM_PROMPT = `Você é NARA, a Secretária Executiva Inteligente do ecossistema AMZTECH.
 Sua filosofia: "QUEM PRECISA. QUEM TEM. NARA CONECTA."
@@ -34,44 +34,114 @@ export default function App() {
   });
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [attachment, setAttachment] = useState(null);
   const bottomRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   useEffect(() => {
     localStorage.setItem('nara_amztech_chat', JSON.stringify(messages));
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const toggleVoice = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('O seu navegador não suporta ditado por voz. Tente usar o Google Chrome ou Microsoft Edge.');
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'pt-BR';
+    recognition.interimResults = false;
+    recognition.onstart = () => setIsListening(true);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64Data = reader.result.split(',')[1];
+      setAttachment({
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        data: base64Data,
+      });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
   const sendMessage = async (customText) => {
     const textToSend = (customText || input).trim();
-    if (!textToSend || loading) return;
+    if ((!textToSend && !attachment) || loading) return;
 
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       setMessages((prev) => [
         ...prev,
-        { role: 'user', text: textToSend },
+        { role: 'user', text: textToSend || `[Arquivo: ${attachment.name}]` },
         {
           role: 'model',
-          text: '⚠️ Ainda falta cadastrar a chave VITE_GEMINI_API_KEY na Vercel ou Netlify e fazer um novo Deploy para eu conseguir responder.',
+          text: '⚠️ Ainda falta cadastrar a chave VITE_GEMINI_API_KEY na Vercel e fazer um novo Deploy.',
         },
       ]);
       setInput('');
+      setAttachment(null);
       return;
     }
 
-    const updatedMessages = [...messages, { role: 'user', text: textToSend }];
+    const currentAttachment = attachment;
+    const displayUserText = currentAttachment
+      ? `${textToSend ? textToSend + '\n' : ''}📎 Anexo: ${currentAttachment.name}`
+      : textToSend;
+
+    const updatedMessages = [
+      ...messages,
+      { role: 'user', text: displayUserText, attachment: currentAttachment },
+    ];
     setMessages(updatedMessages);
     setInput('');
+    setAttachment(null);
     setLoading(true);
 
     try {
-      const contents = updatedMessages.map((m) => ({
-        role: m.role === 'model' ? 'model' : 'user',
-        parts: [{ text: m.text }],
-      }));
+      const contents = updatedMessages.map((m) => {
+        const parts = [];
+        if (m.text) parts.push({ text: m.text });
+        if (m.attachment) {
+          parts.push({
+            inlineData: {
+              mimeType: m.attachment.mimeType,
+              data: m.attachment.data,
+            },
+          });
+        }
+        return {
+          role: m.role === 'model' ? 'model' : 'user',
+          parts,
+        };
+      });
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -110,6 +180,7 @@ export default function App() {
       },
     ];
     setMessages(initial);
+    setAttachment(null);
     localStorage.setItem('nara_amztech_chat', JSON.stringify(initial));
   };
 
@@ -199,24 +270,67 @@ export default function App() {
         <div ref={bottomRef} />
       </main>
 
+      {attachment && (
+        <div className="flex items-center justify-between bg-slate-800 border border-emerald-600/60 text-emerald-200 text-xs px-3 py-2 rounded-xl mb-2">
+          <span>📎 Arquivo pronto para enviar: <strong>{attachment.name}</strong></span>
+          <button
+            type="button"
+            onClick={() => setAttachment(null)}
+            className="text-slate-400 hover:text-red-400 ml-2"
+            title="Remover anexo"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       <form
         onSubmit={(e) => {
           e.preventDefault();
           sendMessage();
         }}
-        className="flex gap-2"
+        className="flex gap-2 items-center"
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,.pdf,.txt,.csv,.doc,.docx"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          title="Importar documento ou foto"
+          className="bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 p-3 rounded-xl transition shrink-0"
+        >
+          <Paperclip className="w-5 h-5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={toggleVoice}
+          title={isListening ? 'Parar gravação de voz' : 'Falar no microfone'}
+          className={`p-3 rounded-xl border transition shrink-0 ${
+            isListening
+              ? 'bg-red-600 border-red-500 text-white animate-pulse'
+              : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-amber-300'
+          }`}
+        >
+          {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+        </button>
+
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Escreva aqui sua ideia, dúvida ou pedido para a NARA..."
+          placeholder={isListening ? 'Ouvindo sua voz...' : 'Escreva, fale ou anexe um arquivo para a NARA...'}
           className="flex-1 bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-xl px-4 py-3 text-sm outline-none"
         />
         <button
           type="submit"
           disabled={loading}
-          className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold px-5 py-3 rounded-xl flex items-center gap-2 transition"
+          className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold px-5 py-3 rounded-xl flex items-center gap-2 transition shrink-0"
         >
           <Send className="w-4 h-4" /> Enviar
         </button>
