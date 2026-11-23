@@ -22,6 +22,7 @@ Seu papel:
 - Atuar como secretária executiva, assistente de planejamento e ponte entre necessidades, conhecimentos, serviços e oportunidades.
 - No DECIDA AÍ: respeitar que YKMS é a arara mentora permanente do jogo, enquanto você (NARA) entra na "Hora do Estalo" quando surge uma ideia relevante para estruturar o projeto, analisar viabilidade, recursos e necessidades, organizar possibilidades de execução e encaminhar ao CONECTAR quando precisar de pessoas, parceiros ou recursos.
 - Na AMZTECH: coordenar, orientar, organizar e acompanhar, sempre deixando claro quando algo ainda está em fase concebida, prototipada ou funcional/testada.
+- Recurso de voz na tela: o site escreve suas respostas na tela, mantém o histórico salvo e possui leitura em voz alta em português do Brasil com o botão "Ouvir resposta". Nunca repita o que o usuário falou ou perguntou apenas para ecoar; vá direto para a resposta, orientação e próximo passo. Nunca diga que não consegue falar ou que opera apenas por texto.
 
 Fluxo operacional de 9 etapas:
 1. Escuta -> 02. Compreende -> 03. Pesquisa -> 04. Planeja -> 05. Valida -> 06. Executa -> 07. Verifica -> 08. Entrega -> 09. Acompanha.
@@ -120,7 +121,7 @@ export default function App() {
 
     utterance.onstart = () => {
       setSpeakingIdx(index);
-      setSpeechStatus('Falando...');
+      setSpeechStatus('NARA falando em voz alta...');
     };
     utterance.onend = () => {
       setSpeakingIdx(null);
@@ -130,7 +131,7 @@ export default function App() {
       setSpeakingIdx(null);
       setSpeechStatus(
         err?.error === 'not-allowed'
-          ? 'Toque novamente em "Ouvir resposta" para liberar o áudio.'
+          ? 'Toque em "Ouvir resposta" para liberar o áudio neste dispositivo.'
           : 'Não foi possível reproduzir o áudio neste dispositivo.'
       );
     };
@@ -306,16 +307,17 @@ export default function App() {
       ...messages,
       { role: 'user', text: displayUserText, attachment: currentAttachment },
     ];
+    const nextModelIndex = updatedMessages.length;
 
     setMessages(updatedMessages);
     setInput('');
     committedTextRef.current = '';
     setAttachment(null);
     setLoading(true);
-    setStatusNote('NARA está organizando sua resposta...');
+    setStatusNote('NARA está organizando e gravando sua resposta...');
 
     try {
-      const recentHistory = updatedMessages.slice(-12).map((m) => {
+      const recentHistory = updatedMessages.slice(-16).map((m) => {
         const parts = [];
         if (m.text) parts.push({ text: m.text });
         if (m.attachment) {
@@ -336,6 +338,7 @@ export default function App() {
 
       if (result.ok) {
         setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
+        speakText(result.reply, nextModelIndex);
       } else {
         setMessages((prev) => [
           ...prev,
@@ -474,7 +477,7 @@ export default function App() {
         })}
         {loading && (
           <div className="text-xs text-amber-400 animate-pulse">
-            {statusNote || 'NARA está organizando sua resposta...'}
+            {statusNote || 'NARA está organizando e gravando sua resposta...'}
           </div>
         )}
         <div ref={bottomRef} />
