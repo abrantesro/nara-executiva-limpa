@@ -20,6 +20,12 @@ Limites obrigatórios (nunca quebrar):
 - Nunca expor dados privados e não substituir especialistas humanos em decisões técnicas, médicas ou jurídicas.
 - Responder sempre em português do Brasil, de forma acolhedora, organizada e com o próximo passo claro.`;
 
+const MODELS_TO_TRY = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+];
+
 export default function App() {
   const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem('nara_amztech_chat');
@@ -39,6 +45,7 @@ export default function App() {
   const bottomRef = useRef(null);
   const fileInputRef = useRef(null);
   const recognitionRef = useRef(null);
+  const voiceDoneRef = useRef(false);
 
   useEffect(() => {
     localStorage.setItem('nara_amztech_chat', JSON.stringify(messages));
@@ -58,16 +65,30 @@ export default function App() {
       return;
     }
 
+    voiceDoneRef.current = false;
     const recognition = new SpeechRecognition();
     recognition.lang = 'pt-BR';
+    recognition.continuous = false;
     recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
     recognition.onstart = () => setIsListening(true);
     recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      if (voiceDoneRef.current) return;
+      voiceDoneRef.current = true;
+      const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+      if (transcript) {
+        setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      }
+      recognition.stop();
     };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => {
+      setIsListening(false);
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
     recognitionRef.current = recognition;
     recognition.start();
   };
@@ -87,6 +108,50 @@ export default function App() {
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const callGeminiWithFallback = async (apiKey, contents) => {
+    let lastError = 'Erro ao conectar com a API do Gemini.';
+
+    for (const modelName of MODELS_TO_TRY) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+              contents,
+            }),
+          }
+        );
+
+        clearTimeout(timeoutId);
+        const data = await response.json();
+
+        if (response.ok) {
+          const reply =
+            data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+            'Não recebi resposta agora. Podemos tentar novamente com calma.';
+          return { ok: true, reply };
+        }
+
+        lastError = data?.error?.message || lastError;
+      } catch (err) {
+        clearTimeout(timeoutId);
+        lastError =
+          err.name === 'AbortError'
+            ? 'A resposta demorou mais do que o esperado. Tente novamente.'
+            : err.message || lastError;
+      }
+    }
+
+    return { ok: false, error: lastError };
   };
 
   const sendMessage = async (customText) => {
@@ -140,33 +205,16 @@ export default function App() {
         };
       });
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents,
-          }),
-        }
-      );
+      const result = await callGeminiWithFallback(apiKey, contents);
 
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data?.error?.message || 'Erro ao conectar com a API do Gemini.');
+      if (result.ok) {
+        setMessages((prev) => [...prev, { role: 'model', text: result.reply }]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${result.error}` },
+        ]);
       }
-
-      const reply =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        'Não recebi resposta agora. Podemos tentar novamente com calma.';
-
-      setMessages((prev) => [...prev, { role: 'model', text: reply }]);
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'model', text: `❌ Encontrei um bloqueio na conexão: ${err.message}` },
-      ]);
     } finally {
       setLoading(false);
     }
